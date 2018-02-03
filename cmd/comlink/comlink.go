@@ -48,34 +48,56 @@ func main() {
 
 func handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	logger := log.New(os.Stderr, fmt.Sprintf("[%v#%v] ", m.ID, m.ChannelID), log.LstdFlags)
+
 	// Do not get stuck talking to himself
 	if m.Author.ID == clientID {
 		return
 	}
 
+	// Only works if we are mentinoed in the message
 	for i := range m.Mentions {
 		// If bot is mentioned in the message
 		if m.Mentions[i].ID == clientID {
 			logger.Printf("RECV %s", m.Content)
+
+			// Always delete previous message
+			logger.Printf("DELT %v", m.ID)
+			if err := s.ChannelMessageDelete(m.ChannelID, m.ID); err != nil {
+				logger.Printf("ERR unable to delete message %v", err)
+			}
+
+			// Lookup some names and detects target channel ID if one is in the message
+			targetChannelName, targetChannelID := findChannelInMessage(s, m.Content)
+			if targetChannelID == "" || targetChannelID == m.ChannelID {
+				// Delete source message so we don't get double
+				targetChannelID = m.ChannelID
+			}
+			authorNick := findAuthorNick(logger, s, m)
+
+			// Prepare the message, removing bot mention and
 			msg := m.ContentWithMentionsReplaced()
 			msg = strings.Replace(msg, "@comlink", "", -1)
 			msg = strings.Replace(msg, "@commlink", "", -1)
+			msg = strings.TrimSpace(channelRe.ReplaceAllString(msg, ""))
 
-			targetChannel := findChannel(m.Content)
-			if targetChannel == "" || targetChannel == m.ChannelID {
-				// Delete source message so we don't get double
-				targetChannel = m.ChannelID
-				defer s.ChannelMessageDelete(m.ChannelID, m.ID)
+			content := fmt.Sprintf("Incoming message from **@%s**", authorNick)
+			if targetChannelName != "" {
+				content += " to **#" + targetChannelName + "**"
 			}
-			s.ChannelMessageSendComplex(targetChannel, &discordgo.MessageSend{
+
+			_, err := s.ChannelMessageSendComplex(targetChannelID, &discordgo.MessageSend{
+				Content: content,
 				Embed: &discordgo.MessageEmbed{
 					Color: 0x000011,
 					Thumbnail: &discordgo.MessageEmbedThumbnail{
 						URL: m.Author.AvatarURL("128"),
 					},
-					Description: "Message from " + m.Author.Mention() + ":\n" + msg,
+					Description: msg,
 				},
 			})
+			if err != nil {
+				logger.Printf("ERR unable to send message via comlink: %v", err)
+			}
 		}
 	}
 }
@@ -92,13 +114,35 @@ func ready(s *discordgo.Session, event *discordgo.Ready) {
 
 var channelRe = regexp.MustCompile("<#(\\d+)>")
 
-func findChannel(m string) string {
+func findChannelInMessage(s *discordgo.Session, m string) (string, string) {
 	sub := channelRe.FindAllStringSubmatch(m, -1)
 	if len(sub) == 0 {
-		return ""
+		return "", ""
 	}
 	if len(sub[0]) >= 2 {
-		return sub[0][1]
+		channelID := sub[0][1]
+		ch, err := s.Channel(channelID)
+		if err != nil {
+			return "", channelID
+		}
+
+		return ch.Name, channelID
 	}
-	return ""
+	return "", ""
+}
+
+func findAuthorNick(logger *log.Logger, s *discordgo.Session, m *discordgo.MessageCreate) string {
+	ch, err := s.Channel(m.ChannelID)
+	if err != nil {
+		logger.Printf("ERR looking up channel %v", err)
+		return m.Author.Username
+	}
+
+	member, err := s.GuildMember(ch.GuildID, m.Author.ID)
+	if err != nil {
+		logger.Printf("ERR looking up member %v", err)
+		return m.Author.Username
+	}
+
+	return member.Nick
 }
